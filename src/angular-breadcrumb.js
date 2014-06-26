@@ -18,15 +18,72 @@ function $Breadcrumb() {
         angular.extend($$options, options);
     };
 
-    this.$get = ['$state', '$rootScope', function($state, $rootScope) {
+    this.$get = ['$state', '$rootScope', '$interpolate', function($state, $rootScope, $interpolate) {
 
-        var $lastViewScope = $rootScope;
+        var $lastViewScope = $rootScope,
+            $statesChain = [];
+
 
         // Early catch of $viewContentLoaded event
         $rootScope.$on('$viewContentLoaded', function (event) {
             // With nested views, the event occur several times, in "wrong" order
             if(isAOlderThanB(event.targetScope.$id, $lastViewScope.$id)) {
                 $lastViewScope = event.targetScope;
+            }
+
+
+            var currentParentStates = [],
+                previousParentStates = angular.copy($statesChain).reverse();
+
+            // Fill the two arrays with parents state (from current state to root)
+            for(var state = $state.$current.self; state && state.name !== ''; state=$$breadcrumbParentState(state)) {
+                currentParentStates.push(angular.copy(state));
+            }
+
+            // There is no need to find the root state if one of the array is empty
+            if(currentParentStates.length !== 0 && previousParentStates.length !== 0)
+            {
+                var iC = 0,
+                    iP = 0;
+
+                // TODO: clean/reduce the while loop
+                // TODO: a for loop might be better
+                // Find the index of the root state in the two arrays
+                while(currentParentStates[iC].name !== previousParentStates[iP].name)
+                {
+                    iP += 1;
+
+                    if(iP === previousParentStates.length)
+                    {
+                        // the root state haven't been found
+                        if(++iC === currentParentStates.length) {
+                            break;
+                        }
+
+                        iP = 0;
+                    }
+                }
+
+                // If a root state have been found
+                if(iC !== currentParentStates.length)
+                {
+                    // states to be deleted
+                    currentParentStates = currentParentStates.slice(0, iC);
+
+                    // states to be added
+                    previousParentStates = previousParentStates.slice(0, iP);
+                }
+            }
+
+            var i;
+            for(i = 0; i < previousParentStates.length; i++)
+            {
+                $$deleteStateInChain($statesChain, previousParentStates[i]);
+            }
+
+            for(i = currentParentStates.length - 1; i >= 0; i--)
+            {
+                $$addStateInChain($statesChain, currentParentStates[i]);
             }
         });
 
@@ -50,6 +107,15 @@ function $Breadcrumb() {
         var $$addStateInChain = function(chain, state) {
             state.ncyBreadcrumbLink = $state.href(state.name);
 
+            if (state.data && state.data.ncyBreadcrumbLabel) {
+                var interpolationFunction = $interpolate(state.data.ncyBreadcrumbLabel);
+                $lastViewScope.$watch(interpolationFunction, function(label) {
+                    state.ncyBreadcrumbLabel= label;
+                });
+            } else {
+                state.ncyBreadcrumbLabel = state.name;
+            }
+
             for(var i=0, l=chain.length; i<l; i+=1) {
               if (chain[i].name === state.name) {
                 return;
@@ -57,7 +123,16 @@ function $Breadcrumb() {
             }
 
             if(!state.abstract && !$$isStateDataProperty(state, 'ncyBreadcrumbSkip')) {
-                chain.unshift(state);
+                chain.push(state);
+            }
+        };
+
+        var $$deleteStateInChain = function(chain, state) {
+            for(var i = 0, l = chain.length; i < l; i++) {
+                if(state.name === chain[i].name && state.name !== $$options.prefixStateName) {
+                    chain.splice(i, 1);
+                    break;
+                }
             }
         };
 
@@ -69,6 +144,16 @@ function $Breadcrumb() {
 
             return $$parentState(state);
         };
+
+        // Adding the root state
+        if($$options.prefixStateName) {
+            var prefixState = $state.get($$options.prefixStateName);
+            if(!prefixState) {
+                throw 'Bad configuration : prefixState "' + $$options.prefixStateName + '" unknown';
+            }
+
+            $$addStateInChain($statesChain, prefixState);
+        }
 
         return {
 
@@ -89,34 +174,13 @@ function $Breadcrumb() {
             },
 
             getStatesChain: function() {
-                var chain = [];
-
-                // From current state to the root
-                for(var state = $state.$current.self; state && state.name !== ''; state=$$breadcrumbParentState(state)) {
-                  $$addStateInChain(chain, state);
-                }
-
-                // Prefix state treatment
-                if($$options.prefixStateName) {
-                    var prefixState = $state.get($$options.prefixStateName);
-                    if(!prefixState) {
-                        throw 'Bad configuration : prefixState "' + $$options.prefixStateName + '" unknown';
-                    }
-
-                    $$addStateInChain(chain, prefixState);
-                }
-
-                return chain;
+                return $statesChain;
             },
-
-            $getLastViewScope: function() {
-                return $lastViewScope;
-            }
         };
     }];
 }
 
-function BreadcrumbDirective($interpolate, $breadcrumb, $rootScope) {
+function BreadcrumbDirective($breadcrumb) {
     this.$$templates = {
         bootstrap2: '<ul class="breadcrumb">' +
             '<li ng-repeat="step in steps | limitTo:(steps.length-1)">' +
@@ -143,66 +207,12 @@ function BreadcrumbDirective($interpolate, $breadcrumb, $rootScope) {
         templateUrl: $breadcrumb.getTemplateUrl(),
         link: {
             post: function postLink(scope) {
-                var labelWatchers = [];
-
-                var getExpression = function(interpolationFunction) {
-                    if(interpolationFunction.expressions) {
-                        return interpolationFunction.expressions;
-                    } else {
-                        var expressions = [];
-                        angular.forEach(interpolationFunction.parts, function(part) {
-                            if(angular.isFunction(part)) {
-                                expressions.push(part.exp);
-                            }
-                        });
-                        return expressions;
-                    }
-                };
-
-                var registerWatchers = function(interpolationFunction, scope, step) {
-                    angular.forEach(getExpression(interpolationFunction), function(expression) {
-                        var watcher = scope.$watch(expression, function() {
-                            step.ncyBreadcrumbLabel = interpolationFunction(scope);
-                        });
-                        labelWatchers.push(watcher);
-                    });
-
-                };
-
-                var deregisterWatchers = function() {
-                    angular.forEach(labelWatchers, function(deregisterWatch) {
-                        deregisterWatch();
-                    });
-                    labelWatchers = [];
-                };
-
-                var renderBreadcrumb = function() {
-                    deregisterWatchers();
-                    var viewScope = $breadcrumb.$getLastViewScope();
-                    scope.steps = $breadcrumb.getStatesChain();
-                    angular.forEach(scope.steps, function (step) {
-                        if (step.data && step.data.ncyBreadcrumbLabel) {
-                            var parseLabel = $interpolate(step.data.ncyBreadcrumbLabel);
-                            step.ncyBreadcrumbLabel = parseLabel(viewScope);
-                            // Watcher for further viewScope updates
-                            registerWatchers(parseLabel, viewScope, step);
-                        } else {
-                            step.ncyBreadcrumbLabel = step.name;
-                        }
-                    });
-                };
-
-                $rootScope.$on('$viewContentLoaded', function () {
-                    renderBreadcrumb();
-                });
-
-                // View(s) may be already loaded while the directive's linking
-                renderBreadcrumb();
+                scope.steps = $breadcrumb.getStatesChain();
             }
         }
     };
 }
-BreadcrumbDirective.$inject = ['$interpolate', '$breadcrumb', '$rootScope'];
+BreadcrumbDirective.$inject = ['$breadcrumb'];
 
 angular.module('ncy-angular-breadcrumb', ['ui.router.state'])
     .provider('$breadcrumb', $Breadcrumb)
